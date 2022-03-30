@@ -1,0 +1,7 @@
+{
+    "solidity.compileUsingRemoteVersion": "v0.8.13+commit.abaa5c0e",
+    "solidity.remappings": [
+        "ds-test/=lib/ds-test/src/",
+        "solmate/=lib/solmate/src/"
+    ]
+}
