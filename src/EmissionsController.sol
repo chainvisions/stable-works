@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Unlicense
 pragma solidity 0.8.13;
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 
@@ -14,6 +15,7 @@ contract EmissionsController {
     /// @notice Info for each user on each forge.
     struct UserForgeInfo {
         uint256 stk;    // Amount of tokens staked by the user in the Forge.
+        uint256 derivStk; // Derived stake amount for the user. Used for boost math.
         uint256 rwrd;   // Amount of tokens endebted to the user in the Forge.
     }
 
@@ -30,8 +32,17 @@ contract EmissionsController {
     /// @notice WORKS token to distribute as a farming incentive.
     IERC20 public works;
 
+    /// @notice veWORKS token for calculating boosts.
+    IERC20 public veWorks;
+
     /// @notice Forges supported by the emissions controller.
     Forge[] public forges;
+
+    /// @notice The rate at which WORKS are emitted at per second.
+    uint256 public worksEmissionRate;
+
+    /// @notice Total weight of the Forges.
+    uint256 public totalForgeWeight;
 
     /// @notice Forge ID for a specific token.
     mapping(IERC20 => uint256) public fidForToken;
@@ -39,11 +50,34 @@ contract EmissionsController {
     /// @notice User info for each Forge.
     mapping(uint256 => mapping(address => UserForgeInfo)) public userForgeInfo;
 
+    /// @notice Reward weights for each Forge.
+    mapping(uint256 => uint256) public weightForForge;
+
+    /// @notice Votes by a user for a specific Forge.
+    mapping(address => mapping(uint256 => uint256)) public userForgeVotes;
+
+    /// @notice Forges voted for by a user.
+    mapping(address => address[]) public userVotedForges;
+
+    /// @notice Voting weights used by a user.
+    mapping(address => uint256) public userUsedForgeWeights;
+
     /// @notice Emitted on a new deposit into a Forge.
     event ForgeDeposit(uint256 indexed fid, uint256 amount);
 
     /// @notice Emitted on withdrawal from the Forge.
     event ForgeWithdrawal(uint256 indexed fid, uint256 amount);
+
+    /// @notice Rebalances the weights of Forges based on their current votes.
+    function cast() external {
+        if(totalForgeWeight > 0) {
+            updateForges(); // Needed, or else rewards will be lost.
+            Forge[] storage _forges = forges;
+            for(uint256 i; i < _forges.length; i++) {
+                _forges[i].worksRate = uint128((worksEmissionRate * weightForForge[i]) / totalForgeWeight);
+            }
+        }
+    }
 
     /// @notice Deposits into a Forge contract.
     /// @param _fid ID of the Forge to deposit into.
@@ -56,14 +90,14 @@ contract EmissionsController {
         // Update user state data and claim any pending rewards.
         _forgeUser.stk = _amount;
         if(_forgeUser.stk > 0) {
-            uint256 pendingRwrd = ((_forgeUser.stk * _forge.poolWorksPerShare) / 1e12) - _forgeUser.rwrd;
-            works.safeTransfer(msg.sender, pendingRwrd);
+            works.safeTransfer(msg.sender, ((_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12) - _forgeUser.rwrd);
         }
-        _forgeUser.rwrd = (_forgeUser.stk * _forge.poolWorksPerShare) / 1e12;
+        _forgeUser.rwrd = (_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12;
         delete userForgeInfo[_fid][msg.sender];
         userForgeInfo[_fid][msg.sender] = _forgeUser;
 
         _forge.stkToken.safeTransferFrom(msg.sender, address(this), _amount);
+        _updateDerivedBalanceForUser(_fid, msg.sender);
         emit ForgeDeposit(_fid, _amount);
     }
 
@@ -76,21 +110,56 @@ contract EmissionsController {
         UserForgeInfo memory _forgeUser = userForgeInfo[_fid][msg.sender];
 
         require(_forgeUser.stk >= _amount, "Cannot withdraw over deposit amount");
-        uint256 pendingRwrd = ((_forgeUser.stk * _forge.poolWorksPerShare) / 1e12) - _forgeUser.rwrd;
+        uint256 pendingRwrd = ((_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12) - _forgeUser.rwrd;
         works.safeTransfer(msg.sender, pendingRwrd);
+
         _forgeUser.stk -= _amount;
-        _forgeUser.rwrd = (_forgeUser.stk * _forge.poolWorksPerShare) / 1e12;
+        _forgeUser.rwrd = (_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12;
         delete userForgeInfo[_fid][msg.sender];
         userForgeInfo[_fid][msg.sender] = _forgeUser;
 
         _forge.stkToken.safeTransfer(msg.sender, _amount);
+        _updateDerivedBalanceForUser(_fid, msg.sender);
         emit ForgeWithdrawal(_fid, _amount);
+    }
+
+    /// @notice Claims WORKS rewards from a Forge.
+    /// @param _fid Forge ID to claim rewards from.
+    function claim(uint256 _fid) external {
+        _updateForge(_fid);
+        Forge memory _forge = forges[_fid];
+        UserForgeInfo memory _forgeUser = userForgeInfo[_fid][msg.sender];
+
+        // Claim and update derived balance.
+        if(_forgeUser.stk > 0) {
+            works.safeTransfer(msg.sender, ((_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12) - _forgeUser.rwrd);
+        }
+        _forgeUser.rwrd = (_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12;
+        _updateDerivedBalanceForUser(_fid, msg.sender);
+    }
+
+    /// @notice Claims from multiple forges.
+    /// @param _fids Forge IDs to claim from.
+    function claimForForges(uint256[] calldata _fids) external {
+        for(uint256 i; i < _fids.length; i++) {
+            uint256 _fid = _fids[i];
+            _updateForge(_fid);
+            Forge memory _forge = forges[_fid];
+            UserForgeInfo memory _forgeUser = userForgeInfo[_fid][msg.sender];
+
+            // Claim and update derived balance.
+            if(_forgeUser.stk > 0) {
+                works.safeTransfer(msg.sender, ((_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12) - _forgeUser.rwrd);
+            }
+            _forgeUser.rwrd = (_forgeUser.derivStk * _forge.poolWorksPerShare) / 1e12;
+            _updateDerivedBalanceForUser(_fid, msg.sender);
+        }
     }
 
     /// @notice Updates reward data for all forges.
     function updateForges() public {
         uint256 _forges = forges.length;
-        for(uint256 i = 0; i < _forges; i++) {
+        for(uint256 i; i < _forges; i++) {
             _updateForge(i);
         }
     }
@@ -111,7 +180,7 @@ contract EmissionsController {
             delete forges[_fid];
             forges[_fid] = _forge;
         }
-        uint256 nRwrd = (_forge.nLastDist - block.timestamp) * _forge.worksRate;
+        uint256 nRwrd = (block.timestamp - _forge.nLastDist) * _forge.worksRate;
         _forge.nLastDist = uint64(block.timestamp);
         _forge.poolWorksPerShare += (nRwrd * 1e12) / nStk;
 
@@ -119,5 +188,21 @@ contract EmissionsController {
         // so that reward variable updates are written to memory and not the storage beforehand.
         delete forges[_fid];
         forges[_fid] = _forge;
+    }
+
+    function _updateDerivedBalanceForUser(uint256 _fid, address _user) internal {
+        Forge memory _forge = forges[_fid];
+        UserForgeInfo memory _forgeUser = userForgeInfo[_fid][_user];
+
+        // Calculate boost adjusted staked balance.
+        IERC20 _veWorks = veWorks;
+        uint256 deriv = (_forgeUser.stk * 40) / 100;
+        uint256 boostAdjusted = 
+        (((_forge.stkToken.balanceOf(address(this)) * _veWorks.balanceOf(msg.sender)) / _veWorks.totalSupply()) * 60) / 100;
+        _forgeUser.derivStk = Math.min(deriv + boostAdjusted, _forgeUser.stk);
+
+        // Clear user info and rewrite with updated info.
+        delete userForgeInfo[_fid][_user];
+        userForgeInfo[_fid][_user] = _forgeUser;
     }
 }
