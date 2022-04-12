@@ -53,6 +53,9 @@ contract EmissionsController {
     /// @notice Reward weights for each Forge.
     mapping(uint256 => uint256) public weightForForge;
 
+    /// @notice Reward weight reserved for each Forge.
+    mapping(uint256 => uint256) public reservedWeightForForge;
+
     /// @notice Votes by a user for a specific Forge.
     mapping(address => mapping(uint256 => uint256)) public userForgeVotes;
 
@@ -162,6 +165,50 @@ contract EmissionsController {
         for(uint256 i; i < _forges; i++) {
             _updateForge(i);
         }
+    }
+
+    /// @notice Adds a new Forge to the EmissionsController.
+    /// @param _stk Token to stake in the pool.
+    /// @param _nReserveWeight Weight reserved for the Forge. Used to bootstrap the initial reward.
+    /// @param _updateForges Whether or not to update all of the reward variables for the forges.
+    function addForge(IERC20 _stk, uint256 _nReserveWeight, bool _updateForges) public {
+        // Update the forges if we have to.
+        if(_updateForges) {
+            updateForges();
+        }
+
+        // Push a new forge with the token.
+        require(fidForToken[_stk] == 0, "Pool already exists");
+        forges.push(Forge({
+            nLastDist: uint64(block.timestamp),
+            worksRate: 0,
+            stkToken: _stk,
+            poolWorksPerShare: 0
+        }));
+        uint256 _fid = forges.length - 1;
+        fidForToken[_stk] = _fid;
+
+        // Add reserved weight.
+        weightForForge[_fid] = _nReserveWeight;
+        reservedWeightForForge[_fid] = _nReserveWeight;
+        totalForgeWeight += _nReserveWeight;
+    }
+
+    /// @notice Removes the reserved weight for a specific Forge.
+    /// @param _fid Forge ID to remove the reserved weight of.
+    /// @param _updateForges Whether or not to update the reward variables of all forges.
+    function removeReservedWeight(uint256 _fid, bool _updateForges) public {
+        // Update if we have to.
+        if(_updateForges) {
+            updateForges();
+        }
+
+        // Remove reserved weights.
+        uint256 reserved = reservedWeightForForge[_fid];
+        weightForForge[_fid] -= reserved;
+        totalForgeWeight -= reserved;
+
+        reservedWeightForForge[_fid] = 0;
     }
 
     function _updateForge(uint256 _fid) internal {

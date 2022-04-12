@@ -12,6 +12,7 @@ import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 contract wStable is ERC20("Wrapped STABLE", "wSTABLE", 18) {
     using SafeTransferLib for IERC20;
 
+    /// @notice STABLE token.
     IERC20 public stable;
 
     constructor(IERC20 _stable) {
