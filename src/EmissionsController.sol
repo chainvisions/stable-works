@@ -29,11 +29,20 @@ contract EmissionsController {
         uint256 poolWorksPerShare;   // Amount of WORKS per share of the Forge. This is used for tracking earnings.
     }
 
+    /// @notice How long WORKS supply will be distributed for.
+    uint256 public constant WORKS_DISTRIBUTION_DURATION = 52.17 weeks; // A full year.
+
     /// @notice WORKS token to distribute as a farming incentive.
     IERC20 public works;
 
     /// @notice veWORKS token for calculating boosts.
     IERC20 public veWorks;
+
+    /// @notice The time when WORKS emissions start.
+    uint256 public tRewardStart;
+
+    /// @notice The time when WORKS emissions end.
+    uint256 public tRewardEnd;
 
     /// @notice Forges supported by the emissions controller.
     Forge[] public forges;
@@ -70,6 +79,16 @@ contract EmissionsController {
 
     /// @notice Emitted on withdrawal from the Forge.
     event ForgeWithdrawal(uint256 indexed fid, uint256 amount);
+
+    /// @notice Distributes WORKS supply and starts emissions.
+    /// @param _supply Supply to emit.
+    function kickstartMyHeart(uint256 _supply) external {
+        require(tRewardStart == 0, "Rewards already started");
+        works.safeTransferFrom(msg.sender, address(this), _supply);
+        tRewardStart = block.timestamp;
+        tRewardEnd = block.timestamp + WORKS_DISTRIBUTION_DURATION;
+        worksEmissionRate = _supply / WORKS_DISTRIBUTION_DURATION;
+    }
 
     /// @notice Votes on forge weights on the EmissionsController
     /// @param _fids Forge IDs to vote on the weights of.
