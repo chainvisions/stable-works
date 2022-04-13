@@ -60,7 +60,7 @@ contract EmissionsController {
     mapping(address => mapping(uint256 => uint256)) public userForgeVotes;
 
     /// @notice Forges voted for by a user.
-    mapping(address => address[]) public userVotedForges;
+    mapping(address => uint256[]) public userVotedForges;
 
     /// @notice Voting weights used by a user.
     mapping(address => uint256) public userUsedForgeWeights;
@@ -71,6 +71,14 @@ contract EmissionsController {
     /// @notice Emitted on withdrawal from the Forge.
     event ForgeWithdrawal(uint256 indexed fid, uint256 amount);
 
+    /// @notice Votes on forge weights on the EmissionsController
+    /// @param _fids Forge IDs to vote on the weights of.
+    /// @param _weights Weights of each forge in `_fids`.
+    function vote(uint256[] calldata _fids, uint256[] calldata _weights) external {
+        require(_weights.length == _fids.length, "Lengths do not match");
+        _vote(msg.sender, _fids, _weights);
+    }
+
     /// @notice Rebalances the weights of Forges based on their current votes.
     function cast() external {
         if(totalForgeWeight > 0) {
@@ -80,6 +88,11 @@ contract EmissionsController {
                 _forges[i].worksRate = uint128((worksEmissionRate * weightForForge[i]) / totalForgeWeight);
             }
         }
+    }
+
+    /// @notice Resets a user's votes.
+    function reset() external {
+        _reset(msg.sender);
     }
 
     /// @notice Deposits into a Forge contract.
@@ -251,5 +264,48 @@ contract EmissionsController {
         // Clear user info and rewrite with updated info.
         delete userForgeInfo[_fid][_user];
         userForgeInfo[_fid][_user] = _forgeUser;
+    }
+
+    function _reset(address _owner) internal {
+        uint256[] storage _userVotedForges = userVotedForges[_owner];
+        uint256 voteCount = _userVotedForges.length;
+
+        for(uint256 i; i < voteCount; i++) {
+            uint256 fid = _userVotedForges[i];
+            uint256 _userForgeVote = userForgeVotes[_owner][fid];
+
+            // Remove the user's voting weight if the forge has a weight.
+            if(_userForgeVote > 0) {
+                totalForgeWeight -= _userForgeVote;
+                weightForForge[fid] -= _userForgeVote;
+                userForgeVotes[_owner][fid] = 0;
+            }
+        }
+        delete userVotedForges[_owner];
+    }
+
+    function _vote(address _owner, uint256[] memory _forgeVotes, uint256[] memory _weights) internal {
+        _reset(_owner);
+        uint256 nVotes = _forgeVotes.length;
+        uint256 usrWeight = veWorks.balanceOf(_owner);
+        uint256 totalWeight = 0;
+        uint256 usedWeight = 0;
+
+        for(uint256 i; i < nVotes; i++) {
+            totalWeight += _weights[i];
+        }
+
+        for(uint256 i; i < nVotes; i++) {
+            uint256 fid = _forgeVotes[i];
+            uint256 forgeWeight = (_weights[i] * usrWeight) / totalWeight;
+
+            usedWeight += forgeWeight;
+            totalForgeWeight += forgeWeight;
+            weightForForge[fid] += forgeWeight;
+            userVotedForges[_owner].push(fid);
+            userForgeVotes[_owner][fid] = forgeWeight;
+        }
+
+        userUsedForgeWeights[_owner] = usedWeight;
     }
 }
